@@ -30,7 +30,6 @@ async function readState() {
       dailyLow100: null,
       dropThresholdPercent: null,
       riseThresholdPercent: null,
-      lastUpdateId: null,
     };
   }
 }
@@ -91,62 +90,6 @@ async function sendTelegramMessage(text) {
   }
 }
 
-async function fetchTelegramUpdates(offset) {
-  if (!TELEGRAM_BOT_TOKEN) return [];
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=0${
-    offset != null ? `&offset=${offset}` : ""
-  }`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    console.error(`getUpdates 실패: ${res.status}`);
-    return [];
-  }
-  const data = await res.json();
-  return data.result ?? [];
-}
-
-// 사용자가 채팅으로 보낸 /threshold, /setdrop, /setrise 명령을 처리한다.
-async function processCommands(state) {
-  const offset = state.lastUpdateId != null ? state.lastUpdateId + 1 : undefined;
-  const updates = await fetchTelegramUpdates(offset);
-
-  for (const update of updates) {
-    state.lastUpdateId = update.update_id;
-
-    const text = update.message?.text?.trim();
-    const chatId = String(update.message?.chat?.id ?? "");
-    if (!text || chatId !== String(TELEGRAM_CHAT_ID)) continue;
-
-    const { drop, rise } = getEffectiveThresholds(state);
-
-    if (text === "/threshold" || text === "/status") {
-      await sendTelegramMessage(
-        `⚙️ <b>현재 임계값</b>\n\n하락 알림: <b>${drop}%</b>\n상승 알림: <b>${rise}%</b>\n\n변경: /setdrop 값, /setrise 값`
-      );
-    } else if (text.startsWith("/setdrop")) {
-      const value = Number(text.split(/\s+/)[1]);
-      if (!Number.isFinite(value) || value <= 0) {
-        await sendTelegramMessage("⚠️ 사용법: /setdrop 1.5 (0보다 큰 숫자)");
-      } else {
-        state.dropThresholdPercent = value;
-        await sendTelegramMessage(`✅ 하락 알림 임계값을 <b>${value}%</b>로 변경했습니다.`);
-      }
-    } else if (text.startsWith("/setrise")) {
-      const value = Number(text.split(/\s+/)[1]);
-      if (!Number.isFinite(value) || value <= 0) {
-        await sendTelegramMessage("⚠️ 사용법: /setrise 1.5 (0보다 큰 숫자)");
-      } else {
-        state.riseThresholdPercent = value;
-        await sendTelegramMessage(`✅ 상승 알림 임계값을 <b>${value}%</b>로 변경했습니다.`);
-      }
-    } else if (text === "/help") {
-      await sendTelegramMessage(
-        `🤖 <b>명령어 안내</b>\n\n/threshold — 현재 임계값 확인\n/setdrop 값 — 하락 임계값 변경\n/setrise 값 — 상승 임계값 변경`
-      );
-    }
-  }
-}
-
 function formatKst(date) {
   return new Intl.DateTimeFormat("ko-KR", {
     timeZone: "Asia/Seoul",
@@ -163,8 +106,6 @@ async function main() {
   const state = await readState();
   const now = new Date();
   const todayKst = kstDateString(now);
-
-  await processCommands(state);
 
   let rate100, apiDate;
   try {

@@ -63,7 +63,7 @@ async function handleCommand(text) {
     await sendTelegramMessage(`✅ 상승 알림 임계값을 <b>${value}%</b>로 변경했습니다.`);
   } else if (text === "/help") {
     await sendTelegramMessage(
-      `🤖 <b>명령어 안내</b>\n\n/threshold — 현재 임계값 확인\n/setdrop 값 — 하락 임계값 변경\n/setrise 값 — 상승 임계값 변경`
+      `🤖 <b>명령어 안내</b>\n\n/threshold — 현재 임계값 확인\n/setdrop 값 — 하락 임계값 변경\n/setrise 값 — 상승 임계값 변경\n\n📊 알림 이력: https://jpy-rate-alert.vercel.app/history`
     );
   }
 }

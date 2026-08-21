@@ -1,9 +1,13 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 const STATE_PATH = new URL("./state.json", import.meta.url);
+const HISTORY_PATH = new URL("./history.json", import.meta.url);
 const RATE_API_URL = "https://api.exchangerate-api.com/v4/latest/JPY";
 const FETCH_RETRY_COUNT = 2;
 const FETCH_RETRY_DELAY_MS = 5000;
+const RATE_POINTS_LIMIT = 96; // 30분 간격 기준 약 48시간
+const DAILY_HISTORY_LIMIT = 90;
+const ALERTS_LIMIT = 100;
 
 const DEFAULT_DROP_THRESHOLD_PERCENT = process.env.DROP_THRESHOLD_PERCENT
   ? Number(process.env.DROP_THRESHOLD_PERCENT)
@@ -36,6 +40,19 @@ async function readState() {
 
 async function writeState(state) {
   await writeFile(STATE_PATH, JSON.stringify(state, null, 2) + "\n", "utf-8");
+}
+
+async function readHistory() {
+  try {
+    const raw = await readFile(HISTORY_PATH, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return { ratePoints: [], dailyHistory: [], alerts: [] };
+  }
+}
+
+async function writeHistory(history) {
+  await writeFile(HISTORY_PATH, JSON.stringify(history, null, 2) + "\n", "utf-8");
 }
 
 function sleep(ms) {
@@ -90,6 +107,67 @@ async function sendTelegramMessage(text) {
   }
 }
 
+async function sendTelegramPhoto(photoUrl, caption) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    throw new Error("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID가 설정되지 않았습니다.");
+  }
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, photo: photoUrl, caption, parse_mode: "HTML" }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`텔레그램 사진 전송 실패: ${res.status} ${body}`);
+  }
+}
+
+function buildLineChartConfig(labels, data, label) {
+  return {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label,
+          data,
+          fill: false,
+          borderColor: "#2563eb",
+          backgroundColor: "#2563eb",
+          pointRadius: 0,
+          tension: 0.2,
+        },
+      ],
+    },
+    options: { plugins: { legend: { display: false } } },
+  };
+}
+
+async function createChartUrl(config) {
+  const res = await fetch("https://quickchart.io/chart/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chart: config, width: 500, height: 300, backgroundColor: "white" }),
+  });
+  if (!res.ok) {
+    throw new Error(`차트 생성 실패: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.url;
+}
+
+// 차트 첨부를 시도하고, 실패하면 텍스트 메시지로만 전송한다.
+async function sendAlertWithChart(text, labels, data, chartLabel) {
+  try {
+    const chartUrl = await createChartUrl(buildLineChartConfig(labels, data, chartLabel));
+    await sendTelegramPhoto(chartUrl, text);
+  } catch (err) {
+    console.error("차트 첨부 실패, 텍스트만 전송:", err.message);
+    await sendTelegramMessage(text);
+  }
+}
+
 function formatKst(date) {
   return new Intl.DateTimeFormat("ko-KR", {
     timeZone: "Asia/Seoul",
@@ -98,12 +176,26 @@ function formatKst(date) {
   }).format(date);
 }
 
+function kstTimeLabel(date) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 function kstDateString(date) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(date);
 }
 
+function logAlert(history, entry) {
+  history.alerts = [...history.alerts, { t: new Date().toISOString(), ...entry }].slice(-ALERTS_LIMIT);
+}
+
 async function main() {
   const state = await readState();
+  const history = await readHistory();
   const now = new Date();
   const todayKst = kstDateString(now);
 
@@ -112,6 +204,7 @@ async function main() {
     ({ rate100, apiDate } = await fetchRate100());
   } catch (err) {
     console.error("환율 조회 최종 실패:", err.message);
+    logAlert(history, { type: "error", message: err.message });
     try {
       await sendTelegramMessage(
         `⚠️ <b>엔화 환율 봇 오류</b>\n\n환율 조회에 ${FETCH_RETRY_COUNT + 1}회 연속 실패했습니다.\n에러: ${err.message}\n\n${formatKst(now)} 기준`
@@ -120,10 +213,15 @@ async function main() {
       console.error("실패 알림 전송도 실패:", notifyErr.message);
     }
     await writeState(state);
+    await writeHistory(history);
     process.exit(1);
   }
 
   console.log(`[${formatKst(now)}] 100엔당 ${rate100.toFixed(2)}원 (API 기준일: ${apiDate})`);
+
+  history.ratePoints = [...history.ratePoints, { t: now.toISOString(), r: rate100 }].slice(
+    -RATE_POINTS_LIMIT
+  );
 
   if (state.dailyDate && state.dailyDate !== todayKst) {
     const summary =
@@ -132,8 +230,26 @@ async function main() {
       `최저: ${state.dailyLow100.toFixed(2)}원\n` +
       `오늘 현재: ${rate100.toFixed(2)}원\n\n` +
       `${formatKst(now)} 기준`;
+
+    history.dailyHistory = [
+      ...history.dailyHistory,
+      {
+        date: state.dailyDate,
+        high: state.dailyHigh100,
+        low: state.dailyLow100,
+        close: state.lastRate100 ?? rate100,
+      },
+    ].slice(-DAILY_HISTORY_LIMIT);
+    logAlert(history, { type: "summary", rate100 });
+
     try {
-      await sendTelegramMessage(summary);
+      const recentDays = history.dailyHistory.slice(-14);
+      await sendAlertWithChart(
+        summary,
+        recentDays.map((d) => d.date.slice(5)),
+        recentDays.map((d) => d.close),
+        "100엔당 원화(종가)"
+      );
       console.log("일일 요약 알림 전송 완료");
     } catch (err) {
       console.error("일일 요약 전송 실패:", err.message);
@@ -165,13 +281,18 @@ async function main() {
       `추적 고점 대비: ${dropFromPeakPercent.toFixed(3)}% / 추적 저점 대비: ${riseFromTroughPercent.toFixed(3)}%`
     );
 
+    const recentPoints = history.ratePoints.slice(-24);
+    const recentLabels = recentPoints.map((p) => kstTimeLabel(new Date(p.t)));
+    const recentRates = recentPoints.map((p) => p.r);
+
     if (dropFromPeakPercent <= -dropThresholdPercent) {
       const message =
         `🔻 <b>엔화 환율 하락 알림</b>\n\n` +
         `100엔당 <b>${rate100.toFixed(2)}원</b>\n` +
         `추적 고점(${peak.toFixed(2)}원) 대비 <b>${dropFromPeakPercent.toFixed(2)}%</b> 하락\n\n` +
         `${formatKst(now)} 기준`;
-      await sendTelegramMessage(message);
+      logAlert(history, { type: "drop", rate100, changePercent: dropFromPeakPercent });
+      await sendAlertWithChart(message, recentLabels, recentRates, "100엔당 원화");
       console.log("하락 알림 전송 완료");
       state.peakRate100 = rate100;
       state.troughRate100 = rate100;
@@ -181,7 +302,8 @@ async function main() {
         `100엔당 <b>${rate100.toFixed(2)}원</b>\n` +
         `추적 저점(${trough.toFixed(2)}원) 대비 <b>${riseFromTroughPercent.toFixed(2)}%</b> 상승\n\n` +
         `${formatKst(now)} 기준`;
-      await sendTelegramMessage(message);
+      logAlert(history, { type: "rise", rate100, changePercent: riseFromTroughPercent });
+      await sendAlertWithChart(message, recentLabels, recentRates, "100엔당 원화");
       console.log("상승 알림 전송 완료");
       state.peakRate100 = rate100;
       state.troughRate100 = rate100;
@@ -194,6 +316,7 @@ async function main() {
   state.lastRate100 = rate100;
   state.lastCheckedAt = now.toISOString();
   await writeState(state);
+  await writeHistory(history);
 }
 
 main().catch((err) => {

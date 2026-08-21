@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "엔화(JPY/KRW) 환율이 직전 확인 대비 1% 이상 하락하면 텔레그램으로 알림을 보내는 GitHub Actions 봇",
+  "description": "엔화(JPY/KRW) 환율이 추적 고점/저점 대비 1% 이상 등락하면 텔레그램으로 알림을 보내고, 일일 요약과 조회 실패 알림도 보내는 GitHub Actions 봇",
   "scripts": {
     "check": "node check.mjs"
   }

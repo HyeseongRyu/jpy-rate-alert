@@ -1,8 +1,16 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 const STATE_PATH = new URL("./state.json", import.meta.url);
-const DROP_THRESHOLD_PERCENT = 1;
 const RATE_API_URL = "https://api.exchangerate-api.com/v4/latest/JPY";
+const FETCH_RETRY_COUNT = 2;
+const FETCH_RETRY_DELAY_MS = 5000;
+
+const DEFAULT_DROP_THRESHOLD_PERCENT = process.env.DROP_THRESHOLD_PERCENT
+  ? Number(process.env.DROP_THRESHOLD_PERCENT)
+  : 1;
+const DEFAULT_RISE_THRESHOLD_PERCENT = process.env.RISE_THRESHOLD_PERCENT
+  ? Number(process.env.RISE_THRESHOLD_PERCENT)
+  : 1;
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -12,7 +20,18 @@ async function readState() {
     const raw = await readFile(STATE_PATH, "utf-8");
     return JSON.parse(raw);
   } catch {
-    return { lastRate100: null, lastCheckedAt: null };
+    return {
+      lastRate100: null,
+      lastCheckedAt: null,
+      peakRate100: null,
+      troughRate100: null,
+      dailyDate: null,
+      dailyHigh100: null,
+      dailyLow100: null,
+      dropThresholdPercent: null,
+      riseThresholdPercent: null,
+      lastUpdateId: null,
+    };
   }
 }
 
@@ -20,17 +39,40 @@ async function writeState(state) {
   await writeFile(STATE_PATH, JSON.stringify(state, null, 2) + "\n", "utf-8");
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getEffectiveThresholds(state) {
+  return {
+    drop: state.dropThresholdPercent ?? DEFAULT_DROP_THRESHOLD_PERCENT,
+    rise: state.riseThresholdPercent ?? DEFAULT_RISE_THRESHOLD_PERCENT,
+  };
+}
+
 async function fetchRate100() {
-  const res = await fetch(RATE_API_URL);
-  if (!res.ok) {
-    throw new Error(`환율 API 응답 실패: ${res.status}`);
+  let lastError;
+  for (let attempt = 1; attempt <= FETCH_RETRY_COUNT + 1; attempt++) {
+    try {
+      const res = await fetch(RATE_API_URL);
+      if (!res.ok) {
+        throw new Error(`환율 API 응답 실패: ${res.status}`);
+      }
+      const data = await res.json();
+      const krwPerJpy = data.rates?.KRW;
+      if (typeof krwPerJpy !== "number") {
+        throw new Error("응답에서 KRW 환율을 찾을 수 없습니다.");
+      }
+      return { rate100: krwPerJpy * 100, apiDate: data.date };
+    } catch (err) {
+      lastError = err;
+      console.error(`환율 조회 실패 (${attempt}/${FETCH_RETRY_COUNT + 1}회): ${err.message}`);
+      if (attempt <= FETCH_RETRY_COUNT) {
+        await sleep(FETCH_RETRY_DELAY_MS);
+      }
+    }
   }
-  const data = await res.json();
-  const krwPerJpy = data.rates?.KRW;
-  if (typeof krwPerJpy !== "number") {
-    throw new Error("응답에서 KRW 환율을 찾을 수 없습니다.");
-  }
-  return { rate100: krwPerJpy * 100, apiDate: data.date };
+  throw lastError;
 }
 
 async function sendTelegramMessage(text) {
@@ -49,6 +91,62 @@ async function sendTelegramMessage(text) {
   }
 }
 
+async function fetchTelegramUpdates(offset) {
+  if (!TELEGRAM_BOT_TOKEN) return [];
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=0${
+    offset != null ? `&offset=${offset}` : ""
+  }`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    console.error(`getUpdates 실패: ${res.status}`);
+    return [];
+  }
+  const data = await res.json();
+  return data.result ?? [];
+}
+
+// 사용자가 채팅으로 보낸 /threshold, /setdrop, /setrise 명령을 처리한다.
+async function processCommands(state) {
+  const offset = state.lastUpdateId != null ? state.lastUpdateId + 1 : undefined;
+  const updates = await fetchTelegramUpdates(offset);
+
+  for (const update of updates) {
+    state.lastUpdateId = update.update_id;
+
+    const text = update.message?.text?.trim();
+    const chatId = String(update.message?.chat?.id ?? "");
+    if (!text || chatId !== String(TELEGRAM_CHAT_ID)) continue;
+
+    const { drop, rise } = getEffectiveThresholds(state);
+
+    if (text === "/threshold" || text === "/status") {
+      await sendTelegramMessage(
+        `⚙️ <b>현재 임계값</b>\n\n하락 알림: <b>${drop}%</b>\n상승 알림: <b>${rise}%</b>\n\n변경: /setdrop 값, /setrise 값`
+      );
+    } else if (text.startsWith("/setdrop")) {
+      const value = Number(text.split(/\s+/)[1]);
+      if (!Number.isFinite(value) || value <= 0) {
+        await sendTelegramMessage("⚠️ 사용법: /setdrop 1.5 (0보다 큰 숫자)");
+      } else {
+        state.dropThresholdPercent = value;
+        await sendTelegramMessage(`✅ 하락 알림 임계값을 <b>${value}%</b>로 변경했습니다.`);
+      }
+    } else if (text.startsWith("/setrise")) {
+      const value = Number(text.split(/\s+/)[1]);
+      if (!Number.isFinite(value) || value <= 0) {
+        await sendTelegramMessage("⚠️ 사용법: /setrise 1.5 (0보다 큰 숫자)");
+      } else {
+        state.riseThresholdPercent = value;
+        await sendTelegramMessage(`✅ 상승 알림 임계값을 <b>${value}%</b>로 변경했습니다.`);
+      }
+    } else if (text === "/help") {
+      await sendTelegramMessage(
+        `🤖 <b>명령어 안내</b>\n\n/threshold — 현재 임계값 확인\n/setdrop 값 — 하락 임계값 변경\n/setrise 값 — 상승 임계값 변경`
+      );
+    }
+  }
+}
+
 function formatKst(date) {
   return new Intl.DateTimeFormat("ko-KR", {
     timeZone: "Asia/Seoul",
@@ -57,33 +155,104 @@ function formatKst(date) {
   }).format(date);
 }
 
+function kstDateString(date) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(date);
+}
+
 async function main() {
   const state = await readState();
-  const { rate100, apiDate } = await fetchRate100();
   const now = new Date();
+  const todayKst = kstDateString(now);
+
+  await processCommands(state);
+
+  let rate100, apiDate;
+  try {
+    ({ rate100, apiDate } = await fetchRate100());
+  } catch (err) {
+    console.error("환율 조회 최종 실패:", err.message);
+    try {
+      await sendTelegramMessage(
+        `⚠️ <b>엔화 환율 봇 오류</b>\n\n환율 조회에 ${FETCH_RETRY_COUNT + 1}회 연속 실패했습니다.\n에러: ${err.message}\n\n${formatKst(now)} 기준`
+      );
+    } catch (notifyErr) {
+      console.error("실패 알림 전송도 실패:", notifyErr.message);
+    }
+    await writeState(state);
+    process.exit(1);
+  }
 
   console.log(`[${formatKst(now)}] 100엔당 ${rate100.toFixed(2)}원 (API 기준일: ${apiDate})`);
 
-  if (state.lastRate100 != null) {
-    const changePercent = ((rate100 - state.lastRate100) / state.lastRate100) * 100;
-    console.log(`직전 대비 변동: ${changePercent.toFixed(3)}%`);
+  if (state.dailyDate && state.dailyDate !== todayKst) {
+    const summary =
+      `📅 <b>어제(${state.dailyDate}) 엔화 환율 요약</b>\n\n` +
+      `최고: ${state.dailyHigh100.toFixed(2)}원\n` +
+      `최저: ${state.dailyLow100.toFixed(2)}원\n` +
+      `오늘 현재: ${rate100.toFixed(2)}원\n\n` +
+      `${formatKst(now)} 기준`;
+    try {
+      await sendTelegramMessage(summary);
+      console.log("일일 요약 알림 전송 완료");
+    } catch (err) {
+      console.error("일일 요약 전송 실패:", err.message);
+    }
+    state.dailyHigh100 = rate100;
+    state.dailyLow100 = rate100;
+  } else {
+    state.dailyHigh100 = state.dailyHigh100 != null ? Math.max(state.dailyHigh100, rate100) : rate100;
+    state.dailyLow100 = state.dailyLow100 != null ? Math.min(state.dailyLow100, rate100) : rate100;
+  }
+  state.dailyDate = todayKst;
 
-    if (changePercent <= -DROP_THRESHOLD_PERCENT) {
+  if (state.peakRate100 == null || state.troughRate100 == null) {
+    console.log("첫 실행: 기준값을 저장합니다.");
+    state.peakRate100 = rate100;
+    state.troughRate100 = rate100;
+  } else {
+    const { drop: dropThresholdPercent, rise: riseThresholdPercent } = getEffectiveThresholds(state);
+    const peak = Math.max(state.peakRate100, rate100);
+    const trough = Math.min(state.troughRate100, rate100);
+    const dropFromPeakPercent = ((rate100 - peak) / peak) * 100;
+    const riseFromTroughPercent = ((rate100 - trough) / trough) * 100;
+
+    if (state.lastRate100 != null) {
+      const stepChangePercent = ((rate100 - state.lastRate100) / state.lastRate100) * 100;
+      console.log(`직전 대비 변동: ${stepChangePercent.toFixed(3)}%`);
+    }
+    console.log(
+      `추적 고점 대비: ${dropFromPeakPercent.toFixed(3)}% / 추적 저점 대비: ${riseFromTroughPercent.toFixed(3)}%`
+    );
+
+    if (dropFromPeakPercent <= -dropThresholdPercent) {
       const message =
         `🔻 <b>엔화 환율 하락 알림</b>\n\n` +
         `100엔당 <b>${rate100.toFixed(2)}원</b>\n` +
-        `직전 확인(${formatKst(new Date(state.lastCheckedAt))}) 대비 <b>${changePercent.toFixed(2)}%</b> 하락\n` +
-        `이전: ${state.lastRate100.toFixed(2)}원 → 현재: ${rate100.toFixed(2)}원\n\n` +
+        `추적 고점(${peak.toFixed(2)}원) 대비 <b>${dropFromPeakPercent.toFixed(2)}%</b> 하락\n\n` +
         `${formatKst(now)} 기준`;
-
       await sendTelegramMessage(message);
-      console.log("텔레그램 알림 전송 완료");
+      console.log("하락 알림 전송 완료");
+      state.peakRate100 = rate100;
+      state.troughRate100 = rate100;
+    } else if (riseFromTroughPercent >= riseThresholdPercent) {
+      const message =
+        `🔺 <b>엔화 환율 상승 알림</b>\n\n` +
+        `100엔당 <b>${rate100.toFixed(2)}원</b>\n` +
+        `추적 저점(${trough.toFixed(2)}원) 대비 <b>${riseFromTroughPercent.toFixed(2)}%</b> 상승\n\n` +
+        `${formatKst(now)} 기준`;
+      await sendTelegramMessage(message);
+      console.log("상승 알림 전송 완료");
+      state.peakRate100 = rate100;
+      state.troughRate100 = rate100;
+    } else {
+      state.peakRate100 = peak;
+      state.troughRate100 = trough;
     }
-  } else {
-    console.log("첫 실행: 기준값을 저장합니다.");
   }
 
-  await writeState({ lastRate100: rate100, lastCheckedAt: now.toISOString() });
+  state.lastRate100 = rate100;
+  state.lastCheckedAt = now.toISOString();
+  await writeState(state);
 }
 
 main().catch((err) => {

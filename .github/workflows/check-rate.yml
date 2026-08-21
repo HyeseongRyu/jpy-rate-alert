@@ -22,6 +22,9 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 저장소 Settings > Secrets and variables > Actions > Variables 에서 설정 (선택, 미설정 시 1% 기본값)
+          DROP_THRESHOLD_PERCENT: ${{ vars.DROP_THRESHOLD_PERCENT }}
+          RISE_THRESHOLD_PERCENT: ${{ vars.RISE_THRESHOLD_PERCENT }}
         run: node check.mjs
 
       - name: Commit updated state

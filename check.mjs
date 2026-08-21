@@ -123,6 +123,15 @@ async function sendTelegramPhoto(photoUrl, caption) {
   }
 }
 
+// 환율은 변동폭에 비해 절대값이 커서 y축이 0부터 시작하면 변동이 안 보이므로,
+// 데이터 범위에 여백만 살짝 두고 y축을 맞춘다.
+function computeYRange(data) {
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const padding = Math.max((max - min) * 0.15, min * 0.003);
+  return { min: min - padding, max: max + padding };
+}
+
 function buildLineChartConfig(labels, data, label) {
   return {
     type: "line",
@@ -140,7 +149,10 @@ function buildLineChartConfig(labels, data, label) {
         },
       ],
     },
-    options: { plugins: { legend: { display: false } } },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: { y: computeYRange(data) },
+    },
   };
 }
 

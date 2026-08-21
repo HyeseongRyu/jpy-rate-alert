@@ -3,6 +3,16 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 
 const ALERT_LABELS = { drop: "🔻 하락", rise: "🔺 상승", summary: "📅 요약", error: "⚠️ 오류" };
 
+// 환율은 변동폭에 비해 절대값이 커서 y축이 0부터 시작하면 변동이 안 보이므로,
+// 데이터 범위에 여백만 살짝 두고 y축을 맞춘다.
+function computeYRange(data) {
+  if (data.length === 0) return {};
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const padding = Math.max((max - min) * 0.15, min * 0.003);
+  return { min: min - padding, max: max + padding };
+}
+
 export default async function handler(req, res) {
   let history = { ratePoints: [], dailyHistory: [], alerts: [] };
   try {
@@ -19,6 +29,9 @@ export default async function handler(req, res) {
   const dailyHistory = (history.dailyHistory ?? []).slice(-30);
   const alerts = (history.alerts ?? []).slice(-50).reverse();
 
+  const closes = dailyHistory.map((d) => d.close);
+  const yRange = computeYRange(closes);
+
   const chartConfig = {
     type: "line",
     data: {
@@ -26,7 +39,7 @@ export default async function handler(req, res) {
       datasets: [
         {
           label: "100엔당 원화(종가)",
-          data: dailyHistory.map((d) => d.close),
+          data: closes,
           borderColor: "#2563eb",
           backgroundColor: "#2563eb",
           pointRadius: 0,
@@ -35,7 +48,10 @@ export default async function handler(req, res) {
         },
       ],
     },
-    options: { plugins: { legend: { display: false } } },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: { y: yRange },
+    },
   };
   const chartUrl = `https://quickchart.io/chart?width=700&height=300&c=${encodeURIComponent(
     JSON.stringify(chartConfig)

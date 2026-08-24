@@ -6,6 +6,6 @@
   "dailyDate": "2026-08-24",
   "dailyHigh100": 873,
   "dailyLow100": 872.0000000000001,
-  "dropThresholdPercent": null,
+  "dropThresholdPercent": 0.5,
   "riseThresholdPercent": null
 }

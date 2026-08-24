@@ -7,5 +7,5 @@
   "dailyHigh100": 873,
   "dailyLow100": 872.0000000000001,
   "dropThresholdPercent": 0.5,
-  "riseThresholdPercent": null
+  "riseThresholdPercent": 0.5
 }

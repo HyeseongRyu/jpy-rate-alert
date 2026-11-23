@@ -1,10 +1,10 @@
 {
-  "lastRate100": 841,
-  "lastCheckedAt": "2026-11-22T22:39:25.252Z",
-  "peakRate100": 841,
+  "lastRate100": 844.9999999999999,
+  "lastCheckedAt": "2026-11-23T03:26:39.841Z",
+  "peakRate100": 844.9999999999999,
   "troughRate100": 841,
   "dailyDate": "2026-11-23",
-  "dailyHigh100": 841,
+  "dailyHigh100": 844.9999999999999,
   "dailyLow100": 841,
   "dropThresholdPercent": 0.5,
   "riseThresholdPercent": 0.5
